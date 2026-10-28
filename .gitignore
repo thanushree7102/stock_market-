@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+lstm_stock_model.keras
+lstm_prediction_plot.png
+.ipynb_checkpoints/

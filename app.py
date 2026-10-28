@@ -1,139 +1,107 @@
-import streamlit as st
+"""Streamlit dashboard: stock forecasting with ARIMA, SARIMA and LSTM."""
 import pandas as pd
-import numpy as np
-from datetime import datetime
-from sklearn.metrics import mean_squared_error
 import plotly.graph_objects as go
-from statsmodels.tsa.arima.model import ARIMA
-from statsmodels.tsa.statespace.sarimax import SARIMAX
-import tensorflow as tf
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense
-import warnings
-warnings.filterwarnings("ignore")
+import streamlit as st
 
-# ---------------------- Load Data --------------------------
-@st.cache_data
-def load_data():
-    df = pd.read_csv('1_min_SPY_2008-2021.csv')
-    df['date'] = pd.to_datetime(df['date'])
-    df.set_index('date', inplace=True)
-    return df
+from config import MIN_ROWS, load_data
+from forecasting import backtest, detect_trend, run_forecast
 
-# ---------------------- LSTM Helpers --------------------------
-def reshape_for_lstm(data, n_steps):
-    X, y = [], []
-    for i in range(len(data) - n_steps):
-        X.append(data[i:i + n_steps])
-        y.append(data[i + n_steps])
-    return np.array(X), np.array(y)
-
-def build_lstm_model(input_shape):
-    model = Sequential()
-    model.add(LSTM(30, activation='relu', input_shape=input_shape))
-    model.add(Dense(1))
-    model.compile(optimizer='adam', loss='mse')
-    return model
-
-def forecast_lstm(y_series, steps=100, n_steps=20):
-    data = y_series.to_numpy()
-    X_train, y_train = reshape_for_lstm(data, n_steps)
-    X_train = X_train.reshape((X_train.shape[0], X_train.shape[1], 1))
-
-    model = build_lstm_model((n_steps, 1))
-    model.fit(X_train, y_train, epochs=1, batch_size=64, verbose=0)
-
-    forecast_input = data[-n_steps:].reshape(1, n_steps, 1)
-    forecast = []
-    for _ in range(steps):
-        pred = model.predict(forecast_input, verbose=0)[0][0]
-        forecast.append(pred)
-        forecast_input = np.append(forecast_input[:, 1:, :], [[[pred]]], axis=1)
-
-    return pd.Series(forecast)
-
-# ---------------------- Classical Forecast Models --------------------------
-def forecast_model(model_type, y, steps=100):
-    if model_type == 'ARIMA':
-        model = ARIMA(y, order=(2, 1, 2)).fit()
-        forecast_obj = model.get_forecast(steps=steps)
-        forecast = forecast_obj.predicted_mean
-        conf_int = forecast_obj.conf_int()
-        return forecast, conf_int
-    elif model_type == 'SARIMA':
-        model = SARIMAX(y, order=(2, 1, 2), seasonal_order=(1, 1, 1, 12)).fit(disp=False)
-        forecast_obj = model.get_forecast(steps=steps)
-        forecast = forecast_obj.predicted_mean
-        conf_int = forecast_obj.conf_int()
-        return forecast, conf_int
-    elif model_type == 'LSTM':
-        forecast = forecast_lstm(y, steps=steps)
-        return forecast, None
-    else:
-        raise ValueError("Unsupported model type")
-
-# ---------------------- Emotion Detection --------------------------
-def detect_emotion(forecast):
-    trend = forecast.diff().fillna(0)
-    up = trend[trend > 0].count()
-    down = trend[trend < 0].count()
-    if up > down:
-        return "📈 Bullish", "The stock shows more upward trends"
-    elif down > up:
-        return "📉 Bearish", "The stock shows more downward trends"
-    else:
-        return "😐 Neutral", "The trend is stable with no major change"
-
-# ---------------------- Streamlit UI --------------------------
 st.set_page_config(page_title="Stock Forecasting App", layout="wide")
-st.title("📊 Stock Forecasting App with Emotion Detection (ARIMA, SARIMA, LSTM)")
+st.title("📊 Stock Forecasting App (ARIMA, SARIMA, LSTM)")
 
-df = load_data()
-stock_options = df['symbol'].unique() if 'symbol' in df.columns else ['SPY']
-stock = st.selectbox("Select Stock", stock_options)
-date_range = st.date_input("Select Date Range", [df.index.min().date(), df.index.max().date()])
-model_type = st.selectbox("Choose Forecasting Model", ['ARIMA', 'SARIMA', 'LSTM'])
 
-n_days = st.slider("Forecast Steps (minutes)", min_value=10, max_value=200, value=60)
+@st.cache_data
+def get_data():
+    return load_data()
 
-if st.button("Run Forecast"):
-    with st.spinner("⏳ Forecasting in progress..."):
-        filtered_df = df[df.index.date >= date_range[0]]
-        filtered_df = filtered_df[filtered_df.index.date <= date_range[1]]
-        y = filtered_df['close']
 
-        if len(y) < 200:
-            st.warning("Not enough data to forecast.")
-        else:
-            forecast, conf_int = forecast_model(model_type, y, steps=n_days)
+@st.cache_data(show_spinner=False)
+def cached_forecast(model_type, values, steps):
+    return run_forecast(model_type, values, steps)
 
-            # Plotting
-            future_index = pd.date_range(start=y.index[-1], periods=n_days + 1, freq='T')[1:]
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(x=y.index, y=y, name="Actual", line=dict(color='blue')))
-            fig.add_trace(go.Scatter(x=future_index, y=forecast, name="Forecast", line=dict(color='green')))
 
-            if conf_int is not None:
-                fig.add_trace(go.Scatter(x=future_index, y=conf_int.iloc[:, 0], name="Lower Bound", line=dict(color='lightgreen', dash='dot')))
-                fig.add_trace(go.Scatter(x=future_index, y=conf_int.iloc[:, 1], name="Upper Bound", line=dict(color='lightgreen', dash='dot')))
+@st.cache_data(show_spinner=False)
+def cached_backtest(model_type, values):
+    return backtest(model_type, values)
 
-            fig.update_layout(title="📉 Forecasted Stock Prices", xaxis_title="Time", yaxis_title="Price", template="plotly_white")
-            st.plotly_chart(fig, use_container_width=True)
 
-            # Emotion Detection
-            emotion, message = detect_emotion(forecast)
-            st.subheader(f"Emotion: {emotion}")
-            st.caption(message)
+df = get_data()
 
-            # Download Forecast Data
-            forecast_df = pd.DataFrame({
-                'timestamp': future_index,
-                'forecasted_close': forecast.values
-            })
+with st.sidebar:
+    st.header("Settings")
+    stock = st.selectbox("Select stock", sorted(df["name"].unique()))
+    sdf = df[df["name"] == stock]
+    min_d, max_d = sdf["date"].min().date(), sdf["date"].max().date()
+    date_range = st.date_input("Date range", value=(min_d, max_d),
+                               min_value=min_d, max_value=max_d)
+    model_type = st.selectbox("Forecasting model", ["ARIMA", "SARIMA", "LSTM"])
+    steps = st.slider("Forecast horizon (trading days)", 5, 90, 30)
+    run = st.button("Run forecast", type="primary")
 
-            if conf_int is not None:
-                forecast_df['lower_bound'] = conf_int.iloc[:, 0].values
-                forecast_df['upper_bound'] = conf_int.iloc[:, 1].values
+if len(date_range) != 2:
+    st.info("Select both a start and an end date.")
+    st.stop()
 
-            csv = forecast_df.to_csv(index=False).encode('utf-8')
-            st.download_button("📥 Download Forecast CSV", data=csv, file_name=f"{stock}_forecast.csv", mime='text/csv')
+mask = (sdf["date"].dt.date >= date_range[0]) & (sdf["date"].dt.date <= date_range[1])
+data = sdf[mask]
+
+st.subheader(f"{stock}: closing price history")
+hist = go.Figure(go.Scatter(x=data["date"], y=data["close"], name="Close",
+                            line=dict(color="royalblue")))
+hist.update_layout(template="plotly_white", xaxis_title="Date", yaxis_title="Price")
+st.plotly_chart(hist, width="stretch")
+
+if not run:
+    st.caption("Choose your settings in the sidebar and click **Run forecast**.")
+    st.stop()
+
+if len(data) < MIN_ROWS:
+    st.warning(f"Need at least {MIN_ROWS} rows to forecast; the selected range has {len(data)}.")
+    st.stop()
+
+values = data["close"].to_numpy(dtype=float)
+
+with st.spinner(f"Training {model_type} and forecasting..."):
+    try:
+        forecast, conf = cached_forecast(model_type, values, steps)
+        metrics = cached_backtest(model_type, values)
+    except ImportError:
+        st.error("TensorFlow is not installed. Run `pip install -r requirements.txt`.")
+        st.stop()
+
+future_dates = pd.bdate_range(start=data["date"].iloc[-1] + pd.Timedelta(days=1),
+                              periods=steps)
+
+fig = go.Figure()
+fig.add_trace(go.Scatter(x=data["date"], y=values, name="Actual",
+                         line=dict(color="royalblue")))
+fig.add_trace(go.Scatter(x=future_dates, y=forecast, name="Forecast",
+                         line=dict(color="green")))
+if conf is not None:
+    fig.add_trace(go.Scatter(x=future_dates, y=conf[:, 0], name="Lower bound",
+                             line=dict(color="lightgreen", dash="dot")))
+    fig.add_trace(go.Scatter(x=future_dates, y=conf[:, 1], name="Upper bound",
+                             line=dict(color="lightgreen", dash="dot")))
+fig.update_layout(title=f"{model_type} forecast for {stock}", template="plotly_white",
+                  xaxis_title="Date", yaxis_title="Price")
+st.plotly_chart(fig, width="stretch")
+
+label, message = detect_trend(forecast)
+c1, c2 = st.columns(2)
+with c1:
+    st.subheader(f"Trend: {label}")
+    st.caption(message)
+with c2:
+    st.subheader("Accuracy (last 30 days held out)")
+    m1, m2, m3 = st.columns(3)
+    m1.metric("RMSE", f"{metrics['RMSE']:.2f}")
+    m2.metric("MAE", f"{metrics['MAE']:.2f}")
+    m3.metric("MAPE", f"{metrics['MAPE %']:.1f}%")
+
+out = pd.DataFrame({"date": future_dates, "forecasted_close": forecast})
+if conf is not None:
+    out["lower_bound"], out["upper_bound"] = conf[:, 0], conf[:, 1]
+st.dataframe(out, width="stretch")
+st.download_button("📥 Download forecast CSV", out.to_csv(index=False).encode("utf-8"),
+                   file_name=f"{stock}_{model_type}_forecast.csv", mime="text/csv")
+st.caption("For learning only. Not financial advice.")
